@@ -1,0 +1,13 @@
+# 建構產物
+*.zip
+
+# 相依套件
+node_modules/
+
+# 系統檔案
+.DS_Store
+Thumbs.db
+
+# 編輯器設定
+.vscode/
+.idea/

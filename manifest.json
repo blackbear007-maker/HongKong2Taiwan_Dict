@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "港台翻譯機",
+  "version": "2.1.0",
+  "description": "將香港粵語用語在地化轉換為台灣常用說法，收錄 1700+ 組詞彙，涵蓋生活、飲食、交通、職場等場景。遇到粗話內容時會以淡化標記取代，不顯示原文。不收集任何個人資料，完全本機運作。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    },
+    "default_title": "港台翻譯機"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["whitelist.js", "dictionary.js", "profanity.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["<all_urls>"]
+}
