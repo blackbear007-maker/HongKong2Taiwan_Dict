@@ -330,6 +330,8 @@
    * 接收來自 background 的開關訊息
    */
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // 【安全】僅接受來自本擴充功能自身的訊息，忽略其他來源
+    if (sender.id !== chrome.runtime.id) return;
     if (message.action === 'toggle') {
       isEnabled = message.enabled;
       if (isEnabled) {
