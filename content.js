@@ -20,17 +20,35 @@
   // 建立詞庫快取（依詞彙長度降序排列，避免短詞蓋過長詞）
   const sortedDict = [...HK2TW_DICTIONARY].sort((a, b) => b.hk.length - a.hk.length);
 
+  // 【單次掃描索引】首字 → 以該字開頭的詞條（長詞優先）
+  // 轉換時逐字掃描原文、每個位置只取最長命中，轉換結果不會再被其他詞條二次轉換，
+  // 避免「紙巾→面紙→臉紙」這類連鎖誤轉。
+  const dictIndex = new Map();
+  for (const entry of sortedDict) {
+    const first = entry.hk[0];
+    if (!dictIndex.has(first)) dictIndex.set(first, []);
+    dictIndex.get(first).push(entry);
+  }
+
   // 粗話詞庫（依長度降序）
   const sortedProfanity = (typeof HK2TW_PROFANITY !== 'undefined')
     ? [...HK2TW_PROFANITY].sort((a, b) => b.hk.length - a.hk.length)
     : [];
 
-  // 粗話詞條的 hk 字串集合（用於快速判斷）
-  const profanitySet = new Set(sortedProfanity.map(e => e.hk));
-
   // 【效能優化】字典首字集合：文字節點若不含任何首字，直接跳過整個詞庫掃描
   const dictFirstChars = new Set(sortedDict.map(e => e.hk[0]));
   const profFirstChars = new Set(sortedProfanity.map(e => e.hk[0]));
+
+  // 【粵語語境閘】只在粵語中出現、幾乎不見於國語書面文的字。
+  // 文字節點含任一標記字才視為粵語語境；標了 ctx: true 的詞條（國語亦常用、
+  // 意思不同的詞，如「地下」「項目」「人工」）只在粵語語境下轉換，
+  // 避免把台灣中文網頁改壞。
+  const CANTO_MARKERS = new Set([...'唔咗嘅喺佢啲嘢冇乜咁嗰嚟睇俾畀搵揾噉㗎喎咩啱攞瞓諗哋嬲啫']);
+  // 無單字標記、但幾乎只出現在粵語的詞（亦視為粵語語境）
+  const CANTO_WORD_RE = /屋企|返工|放工|出糧|的士|邊度|邊個|點解|點樣|幾時|聽日|尋日|琴日|而家|依家|鍾意|傾計|傾偈|埋單|細路|老豆|老細|紅van/;
+  function isCantoText(str) {
+    return hasAnyChar(str, CANTO_MARKERS) || CANTO_WORD_RE.test(str);
+  }
 
   // 【效能A】零記憶體首字快篩：用 for 迴圈取代 [...text].some() 避免陣列展開
   function hasAnyChar(str, charSet) {
@@ -89,8 +107,71 @@
     return false;
   }
 
+  /**
+   * 詞庫轉換核心（純函式）：單次掃描、每個位置取最長命中
+   * @param {string} text  原始文字
+   * @param {boolean} isCanto  是否為粵語語境（決定 ctx 詞條是否生效）
+   * @returns {string} 轉換後文字（無變化時回傳原字串）
+   */
+  function convertDictText(text, isCanto) {
+    // 【效能A】首字快篩：文字不含任何詞條首字則直接略過
+    if (!hasAnyChar(text, dictFirstChars)) return text;
+
+    // 【白名單保護】找出所有白名單詞條的位置，轉換時跳過這些範圍
+    const protectedRanges = [];
+    if (sortedWhitelist.length > 0 && hasAnyChar(text, whitelistFirstChars)) {
+      for (const w of sortedWhitelist) {
+        let pos = 0;
+        while ((pos = text.indexOf(w, pos)) !== -1) {
+          protectedRanges.push([pos, pos + w.length]);
+          pos += w.length;
+        }
+      }
+    }
+    // 與白名單範圍重疊即視為受保護；但若詞條「嚴格涵蓋」整個白名單詞
+    // （例如「冇關係」涵蓋白名單的「關係」），代表詞條更具體，予以放行。
+    const isProtected = (start, end) => {
+      for (let i = 0; i < protectedRanges.length; i++) {
+        const r = protectedRanges[i];
+        if (start < r[1] && end > r[0]) {
+          const coversStrictly = start <= r[0] && end >= r[1] && (end - start) > (r[1] - r[0]);
+          if (!coversStrictly) return true;
+        }
+      }
+      return false;
+    };
+
+    let result = '';
+    let changed = false;
+    let i = 0;
+    const len = text.length;
+    while (i < len) {
+      const candidates = dictIndex.get(text[i]);
+      let matched = null;
+      if (candidates) {
+        for (let c = 0; c < candidates.length; c++) {
+          const entry = candidates[c];
+          if (entry.ctx && !isCanto) continue;
+          if (!text.startsWith(entry.hk, i)) continue;
+          if (protectedRanges.length > 0 && isProtected(i, i + entry.hk.length)) continue;
+          matched = entry;
+          break; // candidates 已依長度降序，首個命中即最長
+        }
+      }
+      if (matched) {
+        result += matched.tw;
+        i += matched.hk.length;
+        changed = true;
+      } else {
+        result += text[i];
+        i++;
+      }
+    }
+    return changed ? result : text;
+  }
+
   function replaceTextNode(node) {
-    let text = node.nodeValue;
+    const text = node.nodeValue;
     if (!text || !text.trim()) return;
 
     // 【安全規則】純英文／純數字／純符號節點直接跳過，不做任何轉換
@@ -101,71 +182,11 @@
       node.__hk2tw_original = text;
     }
 
-    // 【白名單保護】先找出文字中所有白名單詞條的位置，轉換時跳過這些範圍
-    // 【效能A】用 hasAnyChar 取代 [...text].some() 避免陣列展開
-    const hasWhiteChar = sortedWhitelist.length > 0 && hasAnyChar(text, whitelistFirstChars);
-    let protectedRanges = [];
-    if (hasWhiteChar) {
-      for (const w of sortedWhitelist) {
-        let pos = 0;
-        while ((pos = text.indexOf(w, pos)) !== -1) {
-          protectedRanges.push([pos, pos + w.length]);
-          pos += w.length;
-        }
-      }
-    }
+    // 【粵語語境閘】以原文判斷一次，詞庫與粗話兩段共用
+    const isCanto = isCantoText(text);
 
-    // 判斷某位置是否在白名單保護範圍內
-    function isProtected(start, end) {
-      return protectedRanges.some(([s, e]) => start < e && end > s);
-    }
-
-    // 【效能A】首字快篩：用 hasAnyChar 取代 [...text].some()
-    const hasDictChar = hasAnyChar(text, dictFirstChars);
-    if (hasDictChar) {
-      let changed = false;
-      for (const { hk, tw } of sortedDict) {
-        if (!text.includes(hk)) continue;
-        // 逐一比對，跳過白名單保護範圍
-        let result = '';
-        let remaining2 = text;
-        let offset = 0;
-        let localChanged = false;
-        while (true) {
-          const idx = remaining2.indexOf(hk);
-          if (idx === -1) { result += remaining2; break; }
-          const absStart = offset + idx;
-          const absEnd = absStart + hk.length;
-          if (isProtected(absStart, absEnd)) {
-            result += remaining2.slice(0, idx + hk.length);
-            offset += idx + hk.length;
-            remaining2 = remaining2.slice(idx + hk.length);
-          } else {
-            result += remaining2.slice(0, idx) + tw;
-            // 【效能B】偏移修正：直接更新保護範圍座標，不重新掃描白名單
-            if (protectedRanges.length > 0) {
-              const delta = tw.length - hk.length;
-              if (delta !== 0) {
-                for (let ri = 0; ri < protectedRanges.length; ri++) {
-                  const [s, e] = protectedRanges[ri];
-                  if (s >= absEnd) {
-                    protectedRanges[ri] = [s + delta, e + delta];
-                  }
-                }
-              }
-            }
-            offset += idx + hk.length;
-            remaining2 = remaining2.slice(idx + hk.length);
-            localChanged = true;
-          }
-        }
-        if (localChanged) {
-          text = result;
-          changed = true;
-        }
-      }
-      if (changed) node.nodeValue = text;
-    }
+    const converted = convertDictText(text, isCanto);
+    if (converted !== text) node.nodeValue = converted;
 
     // 檢查粗話詞庫（需要插入 span，故要操作 DOM）
     if (sortedProfanity.length === 0) return;
@@ -176,7 +197,8 @@
     // 【效能C】預建所有命中位置，一次排序後線性處理，避免 O(n²) 內層迴圈
     const currentText = node.nodeValue;
     const hits = [];
-    for (const { hk, tw } of sortedProfanity) {
+    for (const { hk, tw, ctx } of sortedProfanity) {
+      if (ctx && !isCanto) continue;
       if (!currentText.includes(hk)) continue;
       let pos = 0, idx;
       while ((idx = currentText.indexOf(hk, pos)) !== -1) {
@@ -361,5 +383,11 @@
       startObserver();
     }
   });
+
+  // 測試掛鉤：僅在 Node 測試環境（事先定義 __HK2TW_TEST__）下暴露純函式；網頁無法觸及
+  if (typeof globalThis !== 'undefined' && globalThis.__HK2TW_TEST__ && typeof globalThis.__HK2TW_TEST__ === 'object') {
+    globalThis.__HK2TW_TEST__.convertDictText = convertDictText;
+    globalThis.__HK2TW_TEST__.isCantoText = isCantoText;
+  }
 
 })();
