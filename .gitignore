@@ -11,3 +11,8 @@ Thumbs.db
 # 編輯器設定
 .vscode/
 .idea/
+
+# Environment files
+.env
+.env.*
+!.env.example
